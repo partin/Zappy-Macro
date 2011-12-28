@@ -153,15 +153,26 @@ int kstroke_handler(struct notifier_block *nb,
     }
 
     // if buffer is full, abort and stop recording
-    if (bufptr == BUF_SIZE) {
+    if (bufptr >= BUF_SIZE-2) {
         printk(KERN_INFO "zappy: Buffer full\n");
         record_state = 0;
         return NOTIFY_DONE;
     }
 
-    keybuffer[bufptr].keycode = kbd_np->value;
-    keybuffer[bufptr].down = kbd_np->down;
-    ++bufptr;
+    if (kbd_np->down == 2) {
+        keybuffer[bufptr].keycode = kbd_np->value;
+        keybuffer[bufptr].down = 0;
+        ++bufptr;
+        keybuffer[bufptr].keycode = kbd_np->value;
+        keybuffer[bufptr].down = 1;
+        ++bufptr;
+    }
+    else {
+        keybuffer[bufptr].keycode = kbd_np->value;
+        keybuffer[bufptr].down = kbd_np->down;
+        ++bufptr;
+    }
+
 //    kbd_np->value, kbd_np->down, kbd_np->shift, kbd_np->ledstate);
 
     return NOTIFY_DONE;
