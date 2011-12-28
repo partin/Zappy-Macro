@@ -35,7 +35,8 @@ install:
 try:
 	-sudo rmmod zappy
 	sudo insmod src/zappy.ko
-#	sleep 1
+	sleep 10
+	-sudo rmmod zappy
 #	sudo chmod a+rwx /dev/macrokbd
 
 #	sudo insmod src/swmouse.ko && 
