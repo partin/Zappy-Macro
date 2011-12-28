@@ -35,7 +35,7 @@ install:
 try:
 	-sudo rmmod zappy
 	sudo insmod src/zappy.ko
-	sleep 10
+	sleep 5
 	-sudo rmmod zappy
 #	sudo chmod a+rwx /dev/macrokbd
 

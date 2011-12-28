@@ -26,35 +26,28 @@
  * MA  02111-1307, USA.
  ****/
 
-#ifndef __KERNEL__
-#  define __KERNEL__
-#endif
-#ifndef MODULE
-#  define MODULE
-#endif
+#include <linux/init.h>
+#include <linux/module.h>
+#include <linux/kernel.h>
+#include <linux/vt_kern.h>  //for fg_console
+#include <linux/slab.h>         /* kmalloc() */
+#include <linux/input.h>        /* usb stuff */
+#include <linux/notifier.h>
+#include <linux/kbd_kern.h>
+
+#include "led.h"
 
 #define BUF_SIZE 1024
 #define RECORD_KEYCODE 70
 #define PLAYBACK_KEYCODE 41
-
-#include <linux/module.h>
-#include <linux/kernel.h>       /* printk() */
-#include <linux/slab.h>         /* kmalloc() */
-#include <linux/input.h>        /* usb stuff */
-#include <linux/notifier.h>
-#include <linux/keyboard.h>
-#include <linux/kbd_kern.h>
-#include <linux/kd.h>
-
-#include <linux/console_struct.h>
-#include <linux/tty.h>
-#include <linux/tty_flip.h>
 
 MODULE_DESCRIPTION ( "Zappy Keyboard Macro" );
 MODULE_AUTHOR ( "Martin Tillenius" );
 MODULE_LICENSE ( "GPL" );
 
 int kstroke_handler(struct notifier_block *, unsigned long, void *);
+
+//struct tty_driver *my_driver;
 
 // notifier block for kbd_listener
 static struct notifier_block nb = {
@@ -74,7 +67,6 @@ struct swkeybd_device {
     struct input_dev *idev; /* input device, to push out input data */
 } swkeybd;
 
-
 struct tasklet_struct task;
 
 void task_fn(unsigned long arg) {
@@ -84,31 +76,17 @@ void task_fn(unsigned long arg) {
         //printk(KERN_INFO "zappy: Keycode %d %d\n",
         //        keybuffer[i].keycode, keybuffer[i].down);
         input_report_key ( swkeybd.idev, keybuffer[i].keycode, keybuffer[i].down);
-        //printk(KERN_INFO "zappy: reported\n");
-        //printk(KERN_INFO "zappy: synced\n");
     }
     input_sync(swkeybd.idev);
     //printk(KERN_INFO "zappy: Playback finished\n");
 }
 
-
-
-/*Called when a key is pressed.
- *Translates the keystroke into a string and stores them for writing to our log
- *file in the module's exit function.
- *
- *Parameters:
- * nb - notifier block we registered with
- * mode - keyboard mode
- * param - keyboard_notifier_param with keystroke data
- *
- *Returns:
- * zero (call me lazy)
- */
 int kstroke_handler(struct notifier_block *nb,
         unsigned long mode, void *param) {
 
     struct keyboard_notifier_param *kbd_np = param;
+
+    // contains: kbd_np->value, kbd_np->down, kbd_np->shift, kbd_np->ledstate);
 
     // ignore everything but KBD_KEYCODE
     if (mode != KBD_KEYCODE)
@@ -134,13 +112,17 @@ int kstroke_handler(struct notifier_block *nb,
             //printk(KERN_INFO "zappy: Start Record\n");
             bufptr = 0;
             record_state = 1;
-            return NOTIFY_DONE;
+            ui_set_state(1);
+            return NOTIFY_STOP;
         }
 
         return NOTIFY_DONE;
     }
 
     // recording
+
+    if (kbd_np->value == PLAYBACK_KEYCODE)
+        return NOTIFY_STOP;
 
     if (kbd_np->value == RECORD_KEYCODE) {
         // consume when key is pushed down (or repeated), and act on when its released
@@ -149,13 +131,15 @@ int kstroke_handler(struct notifier_block *nb,
         //printk(KERN_INFO "zappy: Stop record\n");
         // stop recording
         record_state = 0;
-        return NOTIFY_DONE;
+        ui_set_state(0);
+        return NOTIFY_STOP;
     }
 
     // if buffer is full, abort and stop recording
     if (bufptr >= BUF_SIZE-2) {
         printk(KERN_INFO "zappy: Buffer full\n");
         record_state = 0;
+        ui_set_state(0);
         return NOTIFY_DONE;
     }
 
@@ -173,37 +157,35 @@ int kstroke_handler(struct notifier_block *nb,
         ++bufptr;
     }
 
-//    kbd_np->value, kbd_np->down, kbd_np->shift, kbd_np->ledstate);
-
     return NOTIFY_DONE;
 }
 
 static int __init checkinit(void) {
     int retval = -1;
     record_state = 0;
+
     bufptr = 0;
 
     printk ( KERN_INFO "zappy: Initializing...\n" );
 
     keybuffer = kmalloc(BUF_SIZE, GFP_KERNEL);
 
-    // listen to keyboard events
+    ui_init();
+
     retval = register_keyboard_notifier(&nb);
 
-    /* initialize local structure */
     memset(&swkeybd, 0, sizeof(struct swkeybd_device));
     swkeybd.idev = input_allocate_device();
 
     if (swkeybd.idev) {
-        /* set the name */
         swkeybd.idev->name = "zappykbd";
         swkeybd.idev->id.vendor = 0x00;
         swkeybd.idev->id.product = 0x00;
         swkeybd.idev->id.version = 0x00;
 
-        /* tell the features of this input device: fake only keys */
+        // tell the features of this input device: fake only keys
         swkeybd.idev->evbit[0] = BIT ( EV_KEY );
-
+        // can generate any key
         memset(swkeybd.idev->keybit, 0xff, sizeof(long)*BITS_TO_LONGS(KEY_CNT));
 
         if (input_register_device(swkeybd.idev)) {
@@ -219,7 +201,10 @@ static int __init checkinit(void) {
 }
 
 static void __exit checkexit(void) {
-    //printk ( KERN_INFO "zappy: Cleaning up.\n" );
+    printk ( KERN_INFO "zappy: Cleaning up.\n" );
+
+    ui_set_state(0);
+    ui_clear();
 
     unregister_keyboard_notifier(&nb);
 
@@ -227,6 +212,7 @@ static void __exit checkexit(void) {
     input_free_device ( swkeybd.idev );
 
     kfree(keybuffer);
+
     printk ( KERN_INFO "zappy: module unregistered\n" );
 }
 
