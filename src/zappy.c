@@ -35,19 +35,16 @@
 #include <linux/notifier.h>
 #include <linux/kbd_kern.h>
 
-#include "led.h"
-
 #define BUF_SIZE 1024
 #define RECORD_KEYCODE 70
 #define PLAYBACK_KEYCODE 41
+#define MY_WORK_QUEUE_NAME "ZappyWorkQueue"
 
 MODULE_DESCRIPTION ( "Zappy Keyboard Macro" );
 MODULE_AUTHOR ( "Martin Tillenius" );
 MODULE_LICENSE ( "GPL" );
 
 int kstroke_handler(struct notifier_block *, unsigned long, void *);
-
-//struct tty_driver *my_driver;
 
 // notifier block for kbd_listener
 static struct notifier_block nb = {
@@ -59,15 +56,54 @@ struct keypress {
     int down;
 };
 
-struct keypress *keybuffer;
+static struct keypress *keybuffer;
 static int record_state = 0;
 static int bufptr = 0;
 
-struct swkeybd_device {
+static struct swkeybd_device {
     struct input_dev *idev; /* input device, to push out input data */
 } swkeybd;
 
-struct tasklet_struct task;
+static struct tasklet_struct task;
+static struct workqueue_struct *my_workqueue;
+static struct work_struct TaskClr, TaskSet;
+
+void set_led_internal(struct work_struct *work) {
+    struct tty_struct *tty = vc_cons[fg_console].d->port.tty;
+    struct tty_driver *driver = tty->driver;
+    unsigned long ledstatus;
+
+    ledstatus = (driver->ops->ioctl)(tty, KDGETLED, 0) & 0x7;
+
+    //printk(KERN_INFO "zappy: leds = %08x\n", oldled);
+
+    if (work == &TaskSet)
+        ledstatus |= LED_SCR;
+    else
+        ledstatus &= ~LED_SCR;
+
+    //printk(KERN_INFO "zappy: set leds = %08x\n", ledstatus);
+    (driver->ops->ioctl) (tty, KDSETLED, ledstatus);
+}
+
+static DECLARE_WORK(TaskClr, set_led_internal);
+static DECLARE_WORK(TaskSet, set_led_internal);
+
+void ui_init(void) {
+    my_workqueue = create_workqueue(MY_WORK_QUEUE_NAME);
+}
+
+void ui_clear(void) {
+    flush_workqueue(my_workqueue);
+}
+
+void ui_set_state(int status) {
+    printk(KERN_INFO "zappy: set leds = %d\n", status);
+    if (status == 0)
+        queue_work(my_workqueue, &TaskClr);
+    else
+        queue_work(my_workqueue, &TaskSet);
+}
 
 void task_fn(unsigned long arg) {
     int i;

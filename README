@@ -1,0 +1,23 @@
+
+Zappy Macro
+===========
+
+DECRIPTION
+  A keyboard macro utility running as a loadable kernel module.
+
+USAGE
+  The Scroll Lock key toggles recording of a macro on and off.
+  The key to the left of 1 (on my keyboard) replays the macro.
+  The Scroll Lock LED indicates that a macro is being recorded.
+
+USAGE DEATILS
+  To avoid the playback button to generate undesired input, I
+  am using xmodmap to disable it like this:
+
+    xmodmap -e "keycode 49 ="
+
+IMPLEMENTATION
+  Listens to the keyboard using a keyboard notifier and
+  playbacks macros using a virtual keyboard input device.
+
+
