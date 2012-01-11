@@ -7,8 +7,6 @@
  *     which is heavily based on idiom.c
  *     which is heavily based on usbmouse.c
  *
- *  Copyright (c) 2011 Martin Tillenius
- *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
  * as published by the Free Software Foundation; either version 2
@@ -26,6 +24,10 @@
  * MA  02111-1307, USA.
  ****/
 
+//
+// problem: we get key repeat codes that does not match how keys are repeated.
+// problem: repeated playback
+
 #include <linux/init.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
@@ -34,6 +36,7 @@
 #include <linux/input.h>        /* usb stuff */
 #include <linux/notifier.h>
 #include <linux/kbd_kern.h>
+#include <linux/workqueue.h>
 
 #define BUF_SIZE 1024
 #define RECORD_KEYCODE 70
@@ -56,7 +59,13 @@ struct keypress {
     int down;
 };
 
-static struct keypress *keybuffer;
+typedef struct {
+  struct work_struct my_work;
+  unsigned int keycode;
+  int down;
+} my_work_t;
+
+static my_work_t *keybuffer;
 static int record_state = 0;
 static int bufptr = 0;
 
@@ -64,9 +73,36 @@ static struct swkeybd_device {
     struct input_dev *idev; /* input device, to push out input data */
 } swkeybd;
 
-static struct tasklet_struct task;
 static struct workqueue_struct *my_workqueue;
 static struct work_struct TaskClr, TaskSet;
+static struct work_struct RunMacro, Done;
+
+int running = 0;
+
+void queue_key(struct work_struct *work) {
+    my_work_t *my_work = (my_work_t *)work;
+
+    printk ( KERN_INFO "zappy: queue_key %d %d\n", my_work->keycode, my_work->down);
+
+    //input_event(swkeybd.idev, EV_KEY, my_work->keycode, my_work->down);
+    input_report_key(swkeybd.idev, my_work->keycode, my_work->down);
+    input_sync(swkeybd.idev);
+}
+
+void done_macro(struct work_struct *work) {
+    running = 0;
+}
+
+void run_macro(struct work_struct *work) {
+    int i;
+    //printk ( KERN_INFO "zappy: run macro %d\n", bufptr);
+
+    for (i = 0; i < bufptr; ++i) {
+        PREPARE_WORK(&keybuffer[i].my_work, queue_key);
+        queue_work(my_workqueue, &keybuffer[i].my_work);
+    }
+    queue_work(my_workqueue, &Done);
+}
 
 void set_led_internal(struct work_struct *work) {
     struct tty_struct *tty = vc_cons[fg_console].d->port.tty;
@@ -88,37 +124,27 @@ void set_led_internal(struct work_struct *work) {
 
 static DECLARE_WORK(TaskClr, set_led_internal);
 static DECLARE_WORK(TaskSet, set_led_internal);
+static DECLARE_WORK(RunMacro, run_macro);
+static DECLARE_WORK(Done, done_macro);
 
 void ui_init(void) {
-    my_workqueue = create_workqueue(MY_WORK_QUEUE_NAME);
+    my_workqueue = create_singlethread_workqueue(MY_WORK_QUEUE_NAME);
 }
 
 void ui_clear(void) {
     flush_workqueue(my_workqueue);
+    destroy_workqueue(my_workqueue);
 }
 
 void ui_set_state(int status) {
-    printk(KERN_INFO "zappy: set leds = %d\n", status);
+    //printk(KERN_INFO "zappy: set leds = %d\n", status);
     if (status == 0)
         queue_work(my_workqueue, &TaskClr);
     else
         queue_work(my_workqueue, &TaskSet);
 }
 
-void task_fn(unsigned long arg) {
-    int i;
-    //printk(KERN_INFO "zappy: Playback\n");
-    for (i = 0; i < bufptr; i++) {
-        //printk(KERN_INFO "zappy: Keycode %d %d\n",
-        //        keybuffer[i].keycode, keybuffer[i].down);
-        input_report_key ( swkeybd.idev, keybuffer[i].keycode, keybuffer[i].down);
-    }
-    input_sync(swkeybd.idev);
-    //printk(KERN_INFO "zappy: Playback finished\n");
-}
-
-int kstroke_handler(struct notifier_block *nb,
-        unsigned long mode, void *param) {
+int kstroke_handler(struct notifier_block *nb, unsigned long mode, void *param) {
 
     struct keyboard_notifier_param *kbd_np = param;
 
@@ -132,14 +158,16 @@ int kstroke_handler(struct notifier_block *nb,
 
         // not recording
 
+        if (running == 1)
+            return NOTIFY_DONE;
+
         if (kbd_np->value == PLAYBACK_KEYCODE) {
 
             // consume when key when its released
             if (kbd_np->down == 0)
                 return NOTIFY_STOP;
-
-            tasklet_init(&task, task_fn, 0);
-            tasklet_schedule(&task);
+            running = 1;
+            queue_work(my_workqueue, &RunMacro);
 
             return NOTIFY_STOP; // consume keycode
         }
@@ -168,6 +196,7 @@ int kstroke_handler(struct notifier_block *nb,
         // stop recording
         record_state = 0;
         ui_set_state(0);
+        //printk ( KERN_INFO "zappy: record stop = %d\n", bufptr);
         return NOTIFY_STOP;
     }
 
@@ -178,6 +207,8 @@ int kstroke_handler(struct notifier_block *nb,
         ui_set_state(0);
         return NOTIFY_DONE;
     }
+
+    //printk ( KERN_INFO "zappy: key %d %d\n", kbd_np->value, kbd_np->down);
 
     if (kbd_np->down == 2) {
         keybuffer[bufptr].keycode = kbd_np->value;
@@ -198,13 +229,16 @@ int kstroke_handler(struct notifier_block *nb,
 
 static int __init checkinit(void) {
     int retval = -1;
+    int i;
     record_state = 0;
 
     bufptr = 0;
 
     printk ( KERN_INFO "zappy: Initializing...\n" );
 
-    keybuffer = kmalloc(BUF_SIZE, GFP_KERNEL);
+    keybuffer = kmalloc(BUF_SIZE * sizeof(my_work_t), GFP_KERNEL);
+    for (i = 0; i < BUF_SIZE; ++i)
+        INIT_WORK(&keybuffer[i].my_work, queue_key);
 
     ui_init();
 
@@ -232,13 +266,11 @@ static int __init checkinit(void) {
             return -1;
         }
     }
-
     return retval;
 }
 
 static void __exit checkexit(void) {
     printk ( KERN_INFO "zappy: Cleaning up.\n" );
-
     ui_set_state(0);
     ui_clear();
 
