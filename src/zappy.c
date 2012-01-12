@@ -27,6 +27,8 @@
 //
 // problem: we get key repeat codes that does not match how keys are repeated.
 // problem: repeated playback
+// problem: spurious § characters
+//  changed to slow timers as playback events were missing
 
 #include <linux/init.h>
 #include <linux/module.h>
@@ -78,6 +80,38 @@ static struct work_struct TaskClr, TaskSet;
 static struct work_struct RunMacro, Done;
 
 int running = 0;
+int global_key = 0;
+
+static void keypress_timer(unsigned long private) {
+    int i;
+    for (i = 0; i < 4; ++i) {
+        if (global_key < bufptr) {
+            input_report_key(swkeybd.idev,
+                    keybuffer[global_key].keycode,
+                    keybuffer[global_key].down);
+            input_sync(swkeybd.idev);
+            ++global_key;
+        }
+        else
+            break;
+    }
+
+    if (global_key < bufptr)
+        mod_timer(&swkeybd.idev->timer, jiffies);
+    else {
+        global_key = 0;
+        running = 0;
+    }
+}
+
+static void timer_init(void) {
+    init_timer(&swkeybd.idev->timer);
+    swkeybd.idev->timer.function = keypress_timer;
+}
+
+static void timer_delete(void) {
+    del_timer_sync(&swkeybd.idev->timer);
+}
 
 void queue_key(struct work_struct *work) {
     my_work_t *my_work = (my_work_t *)work;
@@ -94,14 +128,18 @@ void done_macro(struct work_struct *work) {
 }
 
 void run_macro(struct work_struct *work) {
-    int i;
-    //printk ( KERN_INFO "zappy: run macro %d\n", bufptr);
+    swkeybd.idev->timer.expires = jiffies;
+//    add_timer(&swkeybd.idev->timer);
+    mod_timer(&swkeybd.idev->timer, jiffies);
 
-    for (i = 0; i < bufptr; ++i) {
-        PREPARE_WORK(&keybuffer[i].my_work, queue_key);
-        queue_work(my_workqueue, &keybuffer[i].my_work);
-    }
-    queue_work(my_workqueue, &Done);
+//    int i;
+//    //printk ( KERN_INFO "zappy: run macro %d\n", bufptr);
+//
+//    for (i = 0; i < bufptr; ++i) {
+//        PREPARE_WORK(&keybuffer[i].my_work, queue_key);
+//        queue_work(my_workqueue, &keybuffer[i].my_work);
+//    }
+//    queue_work(my_workqueue, &Done);
 }
 
 void set_led_internal(struct work_struct *work) {
@@ -151,15 +189,18 @@ int kstroke_handler(struct notifier_block *nb, unsigned long mode, void *param) 
     // contains: kbd_np->value, kbd_np->down, kbd_np->shift, kbd_np->ledstate);
 
     // ignore everything but KBD_KEYCODE
-    if (mode != KBD_KEYCODE)
+    if (mode != KBD_KEYCODE) {
+        if (mode == KBD_UNBOUND_KEYCODE && kbd_np->value == PLAYBACK_KEYCODE)
+            return NOTIFY_STOP;
         return NOTIFY_DONE;
+    }
 
     if (record_state == 0) {
 
         // not recording
 
         if (running == 1)
-            return NOTIFY_DONE;
+            return NOTIFY_STOP;
 
         if (kbd_np->value == PLAYBACK_KEYCODE) {
 
@@ -167,7 +208,11 @@ int kstroke_handler(struct notifier_block *nb, unsigned long mode, void *param) 
             if (kbd_np->down == 0)
                 return NOTIFY_STOP;
             running = 1;
-            queue_work(my_workqueue, &RunMacro);
+            swkeybd.idev->timer.expires = jiffies;
+        //    add_timer(&swkeybd.idev->timer);
+            mod_timer(&swkeybd.idev->timer, jiffies);
+
+//            queue_work(my_workqueue, &RunMacro);
 
             return NOTIFY_STOP; // consume keycode
         }
@@ -180,7 +225,7 @@ int kstroke_handler(struct notifier_block *nb, unsigned long mode, void *param) 
             return NOTIFY_STOP;
         }
 
-        return NOTIFY_DONE;
+        return NOTIFY_STOP;
     }
 
     // recording
@@ -265,12 +310,14 @@ static int __init checkinit(void) {
             kfree(keybuffer);
             return -1;
         }
+        timer_init();
     }
     return retval;
 }
 
 static void __exit checkexit(void) {
     printk ( KERN_INFO "zappy: Cleaning up.\n" );
+    timer_delete();
     ui_set_state(0);
     ui_clear();
 
